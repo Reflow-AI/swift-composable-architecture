@@ -92,7 +92,7 @@ final class RootCore<Root: Reducer>: Core {
 
     self.isSending = true
     var currentState = self.state
-    let tasks = LockIsolated<[Task<Void, Never>]>([])
+    let tasks = EffectTasks()
     defer {
       withExtendedLifetime(self.bufferedActions) {
         self.bufferedActions.removeAll()
@@ -104,7 +104,7 @@ final class RootCore<Root: Reducer>: Core {
           self.bufferedActions.removeLast(),
           origin: .effect
         ) {
-          tasks.withValue { $0.append(task) }
+          tasks.append(task)
         }
       }
     }
@@ -137,7 +137,7 @@ final class RootCore<Root: Reducer>: Core {
                 if let task = continuation.yield({
                   self.send(effectAction, origin: .effect)
                 }) {
-                  tasks.withValue { $0.append(task) }
+                  tasks.append(task)
                 }
               }
             )
@@ -149,7 +149,7 @@ final class RootCore<Root: Reducer>: Core {
             effectCancellable.cancel()
           }
           boxedTask.wrappedValue = task
-          tasks.withValue { $0.append(task) }
+          tasks.append(task)
           self.effectCancellables[uuid] = AnyCancellable { @Sendable in
             task.cancel()
           }
@@ -184,13 +184,13 @@ final class RootCore<Root: Reducer>: Core {
                 if let task = continuation.yield({
                   self?.send(effectAction, origin: .effect)
                 }) {
-                  tasks.withValue { $0.append(task) }
+                  tasks.append(task)
                 }
               }
             )
             self?.effectCancellables[uuid] = nil
           }
-          tasks.withValue { $0.append(task) }
+          tasks.append(task)
           self.effectCancellables[uuid] = AnyCancellable { @Sendable in
             task.cancel()
           }
@@ -201,18 +201,53 @@ final class RootCore<Root: Reducer>: Core {
     guard !tasks.isEmpty else { return nil }
     return Task { @MainActor in
       await withTaskCancellationHandler {
-        var index = tasks.startIndex
-        while index < tasks.endIndex {
+        var index = 0
+        while index < tasks.count {
           defer { index += 1 }
-          await tasks[index].value
+          await tasks[index]?.value
         }
       } onCancel: {
-        var index = tasks.startIndex
-        while index < tasks.endIndex {
+        var index = 0
+        while index < tasks.count {
           defer { index += 1 }
-          tasks[index].cancel()
+          tasks[index]?.cancel()
         }
       }
+    }
+  }
+}
+
+/// The tasks started while processing an action, awaited and cancelled by the task `_send` returns.
+///
+/// A task's slot is cleared as soon as the task finishes. Otherwise a long-living effect that sends
+/// actions retains every finished child task for as long as it runs. Slots are never removed, so
+/// indices stay stable while the returned task walks them, including slots appended after it
+/// started.
+private final class EffectTasks: @unchecked Sendable {
+  private let lock = NSRecursiveLock()
+  private var tasks: [Task<Void, Never>?] = []
+
+  var count: Int {
+    lock.sync { tasks.count }
+  }
+
+  var isEmpty: Bool {
+    lock.sync { tasks.isEmpty }
+  }
+
+  subscript(index: Int) -> Task<Void, Never>? {
+    lock.sync { tasks[index] }
+  }
+
+  func append(_ task: Task<Void, Never>) {
+    let index = lock.sync {
+      tasks.append(task)
+      return tasks.count - 1
+    }
+    Task.detached(priority: .background) { [weak self] in
+      await task.value
+      guard let self else { return }
+      lock.sync { tasks[index] = nil }
     }
   }
 }
