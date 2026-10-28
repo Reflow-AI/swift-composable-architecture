@@ -116,7 +116,7 @@ final class MemoryManagementTests: BaseTCATestCase {
       await task.finish()
 
       // Retaining every finished child task grows the heap by over a kilobyte per child (about
-      // 13 MB here). Releasing them leaves only the cleared slots behind.
+      // 13 MB here). Releasing them leaves nothing per child behind.
       XCTAssertLessThan(after - before, 3_000_000, "Heap grew by \(after - before) bytes")
     }
   #endif

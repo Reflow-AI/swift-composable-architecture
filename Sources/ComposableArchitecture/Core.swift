@@ -219,16 +219,17 @@ final class RootCore<Root: Reducer>: Core {
 
 /// The tasks started while processing an action, awaited and cancelled by the task `_send` returns.
 ///
-/// An effect that keeps sending actions appends the task each send returns for as long as it runs,
-/// so those slots are cleared as soon as their task finishes; otherwise a long-living effect keeps
-/// every finished child task alive. Slots are never removed, so indices stay stable while the
-/// returned task walks them, including slots appended after it started.
+/// An effect that keeps sending actions adds the task each send returns for as long as it runs,
+/// so those tasks are dropped as soon as they finish; otherwise a long-living effect keeps every
+/// finished child task alive. Indices are never reused, so they stay stable while the returned
+/// task walks them, including tasks added after it started, and storage only holds live tasks.
 private final class EffectTasks: @unchecked Sendable {
   private let lock = NSRecursiveLock()
-  private var tasks: [Task<Void, Never>?] = []
+  private var tasks: [Int: Task<Void, Never>] = [:]
+  private var nextIndex = 0
 
   var count: Int {
-    lock.sync { tasks.count }
+    lock.sync { nextIndex }
   }
 
   subscript(index: Int) -> Task<Void, Never>? {
@@ -236,18 +237,24 @@ private final class EffectTasks: @unchecked Sendable {
   }
 
   func append(_ task: Task<Void, Never>) {
-    lock.sync { tasks.append(task) }
+    insert(task)
   }
 
   func appendReleasingWhenFinished(_ task: Task<Void, Never>) {
-    let index = lock.sync {
-      tasks.append(task)
-      return tasks.count - 1
-    }
+    let index = insert(task)
     Task.detached(priority: .low) { [weak self] in
       await task.value
       guard let self else { return }
-      lock.sync { tasks[index] = nil }
+      lock.sync { _ = tasks.removeValue(forKey: index) }
+    }
+  }
+
+  @discardableResult
+  private func insert(_ task: Task<Void, Never>) -> Int {
+    lock.sync {
+      defer { nextIndex += 1 }
+      tasks[nextIndex] = task
+      return nextIndex
     }
   }
 }
